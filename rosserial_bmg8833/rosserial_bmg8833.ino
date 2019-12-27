@@ -12,7 +12,10 @@
 #define AMG88XX_WIDTH  (8)
 #define AMG88XX_HEIGHT (AMG88xx_PIXEL_ARRAY_SIZE / AMG88XX_WIDTH)
 
-ros::NodeHandle_<ArduinoHardware, 5, 5, 512, 2048> nh;
+#define USE_VELOCITY_CONTROL_MODE
+
+// ros::NodeHandle_<ArduinoHardware, 5, 5, 512, 2048> nh;
+ros::NodeHandle_<ArduinoHardware, 32, 32, 2048, 2048> nh;
 sensor_msgs::Image img_msg;
 ros::Publisher pub_img("image_raw", &img_msg);
 
@@ -36,17 +39,27 @@ namespace dyne {
   // I2C command requires 3[bytes]
   // [CMD] [VALUE(upper byte)] [VALUE(lower byte)]
   constexpr uint8_t kVelCmd = 0x10;
+  constexpr uint8_t kPosCmd = 0x20;
+  constexpr uint8_t kPwmCmd = 0x30;
 
+#if defined(USE_VELOCITY_CONTROL_MODE)
+  // 1.0[m/sec] ==> [round/minutes] 
+  constexpr float kWheelRadius = 0.06; // [m]
+  constexpr float kDistPerRound = 2.0 * 3.1415 * kWheelRadius; // 2*pi*r [m]
+  constexpr float kVel2RPS = 15.0 * 60.0 / kDistPerRound;
+#else
   // 1.0[m/sec] ==> 80 (PWM value);
   constexpr float kVel2PWM = 80 / 1.0;
+#endif
 
-  void SendMotorPwmCommand(uint8_t addr, int16_t vel) {
+#if defined(USE_VELOCITY_CONTROL_MODE)
+  void SendMotorVelCommand(uint8_t addr, int16_t vel) {
     Wire.beginTransmission(addr);
 
-    if (vel < -80) {
-      vel = -80;
-    } else if (vel > +80) {
-      vel = +80;
+    if (vel < -2000) {
+      vel = -2000;
+    } else if (vel > +2000) {
+      vel = +2000;
     }
 
     uint8_t data[3] = {
@@ -58,18 +71,47 @@ namespace dyne {
 
     Wire.endTransmission();
   }
+#else
+  void SendMotorPwmCommand(uint8_t addr, int16_t vel) {
+    Wire.beginTransmission(addr);
+
+    if (vel < -80) {
+      vel = -80;
+    } else if (vel > +80) {
+      vel = +80;
+    }
+
+    uint8_t data[3] = {
+      kPwmCmd,
+      (uint8_t)(vel >> 8),
+      (uint8_t)(vel)
+    };
+    Wire.write(data, 3);
+
+    Wire.endTransmission();
+  }
+#endif
 
   void Stop(void) {
+#if defined(USE_VELOCITY_CONTROL_MODE)
+    SendMotorVelCommand(kLLegAddr, 0);
+    SendMotorVelCommand(kRLegAddr, 0);
+#else
     SendMotorPwmCommand(kLLegAddr, 0);
     SendMotorPwmCommand(kRLegAddr, 0);
+#endif
   }
 
   /*
    * in rot [rad/s]
-   * out PWM value
+   * out PWM value / Vel [rpm]
    */
   int16_t Linear2Motor(float vel) {
+#if defined(USE_VELOCITY_CONTROL_MODE)
+    return kVel2RPS * vel;
+#else
     return kVel2PWM * vel;
+#endif
   }
 
   /*
@@ -77,9 +119,13 @@ namespace dyne {
    * out PWM value
    */
   int16_t Rotary2Motor(float rot) {
-    // 0.5[m/sec] ==> 80 (PWM value);
     constexpr float kRadius = 0.1; // [m]
+#if defined(USE_VELOCITY_CONTROL_MODE)
+    return kVel2RPS * (kRadius * rot);
+#else
+    // 0.5[m/sec] ==> 80 (PWM value);
     return kVel2PWM * (kRadius * rot);
+#endif
   }
 
   constexpr bool IsStop(float vel_x, float rot_z) {
@@ -107,6 +153,11 @@ namespace dyne {
       //      -80   | val + offset |  0   |  0    | val + offset |   +80
       int16_t left  = pwm_lin - pwm_rot;
       int16_t right = pwm_lin + pwm_rot;
+
+#if defined(USE_VELOCITY_CONTROL_MODE)
+      SendMotorVelCommand(kLLegAddr, +left);
+      SendMotorVelCommand(kRLegAddr, -right);
+#else
       if (left > 0) {
         if (left < 4) {
           left = 0;
@@ -135,6 +186,7 @@ namespace dyne {
       SendMotorPwmCommand(kLLegAddr, -left);
       SendMotorPwmCommand(kRLegAddr, -right);
 //    }
+#endif
   }
 }
 
@@ -163,17 +215,16 @@ void setup() {
 
   blink(5, 500);
 
+  // nh.getHardware()->setBaud(115200);
   nh.initNode();
   nh.advertise(pub_img);
   nh.subscribe(sub_twist);
-//  dyne::SendMotorPwmCommand(0x31, -30);
-//  dyne::SendMotorPwmCommand(0x32, -35);
 }
 
 void loop() {
   amg.readPixels(pixels);
 
-  delay(100);
+  delay(30);
   pub_img.publish(&img_msg);
   
   nh.spinOnce();
